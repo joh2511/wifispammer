@@ -1,13 +1,19 @@
 import random, os, argparse, sys
+from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt, RadioTap
+from scapy.sendrecv import sendp
+
+
 try:
-    from scapy.all import ( Dot11,
-                            Dot11Beacon,
-                            Dot11Elt,
-                            RadioTap,
-                            sendp)
-except ImportError:
+    from scapy.layers.dot11 import (
+        Dot11,
+        Dot11Beacon,
+        Dot11Elt,
+        RadioTap)
+    from scapy.sendrecv import sendp
+except ImportError as err:
     print("Scapy could not be imported.")
     print("Make sure to 'pip3 install scapy'")
+    print(err)
     sys.exit(0)
 
 
@@ -38,18 +44,24 @@ def getSSIDs(file):
     return SSIDs
 
 # Sets interface in monitor mode
-def setMonitor(interface):
-    exitValue = 0
-    print(f"Setting {interface} in monitor mode...")
-    os.system(f"ifconfig {interface} down")
-    exitValue = os.system(f"iwconfig {interface} mode monitor")
-    os.system(f"ifconfig {interface} up")
+def setIwconfig(interface, value):
+    # value can be either monitor or managed
+    if value != "monitor" and value != "managed":
+        pass
 
-    if exitValue != 0:
-        print("")
-        print("Something went wrong setting monitor mode.")
-        print("Are you sure your card supports monitor mode?")
-        sys.exit(0)
+    cmds = [
+        f"ip link set dev {interface} down",
+        f"iwconfig {interface} mode {value}",
+        f"ip link set dev {interface} up",
+    ]
+    print(f"Setting {interface} in monitor mode...")
+    for cmd in cmds:
+        exitValue = os.system(cmd)
+        if exitValue != 0:
+            raise OSError(
+                "Something went wrong setting monitor mode! "
+                "Are you sure your card supports monitor mode?")
+
 
 # Sets interface in managed mode
 def setManaged(interface):
@@ -71,78 +83,113 @@ rsn = Dot11Elt(ID='RSNinfo', info=(
 '\x00\x0f\xac\x02'      #Pre-Shared Key
 '\x00\x00'))            #RSN Capabilities (no extra capabilities)
 
-# Parse arguments
-DESCRIPTION = "Another silly beacon spammer ;)"
-parser = argparse.ArgumentParser(description=DESCRIPTION)
-parser.add_argument("-f", "--file", default="wifi.lst", help="File to import the SSIDs from (default wifi.lst)")
-parser.add_argument("-v", "--vendor", default="Apple", help="Vendor to spoof (-l to list available vendors)")
-parser.add_argument("-i", "--interface", help="Interface used to spam SSIDs")
-parser.add_argument("-l", "--list-vendors",action="store_true", help="List vendors")
-parser.add_argument("-r", "--random-mac",action="store_true", help="Uses a fully random BSSID instead of using a vendor")
-args = parser.parse_args()
 
-# Check OS
-if sys.platform.lower() != "linux":
-    print("This script only works in Linux!")
-    sys.exit(0)
+def send_beacons(interface, sender, channel, SSIDs):
+    last_channel = 0
+    for SSID in SSIDs:
+        #Switch channel
+        next_channel = channel()
+        if next_channel != last_channel:
+            print(f"Switching channel to {next_channel}")
+            result = os.system(f"iw dev {interface} set channel {next_channel}")
+            if result != 0:
+                raise OSError("Switching channel failed!")
+            last_channel = next_channel
 
-# Check root
-if os.getuid() != 0:
-    print("Must run as root!")
-    sys.exit(0)
+        # Create paquet
+        print(f"Sending paquet with SSID \"{SSID}\" with MAC: \"{sender}\" ")
+        dot11 = Dot11(
+            type=0,
+            subtype=8,
+            addr1='ff:ff:ff:ff:ff:ff',
+            addr2=sender,
+            addr3=sender)
+        essid = Dot11Elt(ID='SSID',info=SSID, len=len(SSID))
+        frame = RadioTap() / dot11 / beacon / essid / rsn
+        sendp(frame, iface=interface, inter=0.050, loop=0, verbose=1, count=8)
 
-# List vendors if -l is present
-if args.list_vendors:
-    print("Vendors to choose (default Apple):\n")
-    for vendor in vendors:
-        print(vendor)
-    sys.exit(0)
+def prepare(interface):
+    print("Prepare!")
+    os.system(f"nmcli dev set {interface} managed no")
+    setIwconfig(interface, "monitor")
 
-# Check interface
-if not args.interface:
-    print("Interface not specified. Extiting...")
-    sys.exit(0)
-else:
-    interfaces = os.listdir("/sys/class/net/")
-    if args.interface not in interfaces:
-        print("Interface not found")
-        sys.exit(0)
+def teardown(interface):
+    print("Teardown!")
+    setIwconfig(interface, "managed")
+    os.system(f"nmcli dev set {interface} managed yes")
 
-# Set interface in monitor mode
-setMonitor(args.interface)
 
-# Main loop
-try:
-    SSIDs=getSSIDs(args.file)
-    iface = args.interface
-    while True:
-        
-        #For each SSID
-        for SSID in SSIDs:
+def main():
+    # Check OS
+    if sys.platform.lower() != "linux":
+        raise OSError("This script only works in Linux!")
 
-            # Set MAC
-            if args.random_mac:
-                sender=randomMAC
-            else:
-                sender = randomMACVendor(vendors[args.vendor])
-            
-            # Create paquet
-            dot11 = Dot11(type=0, subtype=8, addr1='ff:ff:ff:ff:ff:ff',
-            addr2=sender, addr3=sender)
-            essid = Dot11Elt(ID='SSID',info=SSID, len=len(SSID))
-            frame = RadioTap()/dot11/beacon/essid/rsn
-            print("Sending paquet with SSID: " + SSID)
-            print("MAC: " + sender)
+    # Check root
+    if os.getuid() != 0:
+        raise OSError("Must run as root!")
 
-            #Switch channel
-            channel = random.randint(1,11)
-            os.system(f"iw dev {args.interface} set channel {channel}")
-            print("Channel " + str(channel))
+    # Parse arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-f", "--file", default="wifi.lst", help="File to import the SSIDs from (default wifi.lst)")
+    parser.add_argument("-v", "--vendor", default="Apple", help="Vendor to spoof (-l to list available vendors)")
+    parser.add_argument("-i", "--interface", help="Interface used to spam SSIDs")
+    parser.add_argument("-l", "--list-vendors",action="store_true", help="List vendors")
+    parser.add_argument("-r", "--random-mac",action="store_true", help="Uses a fully random BSSID instead of using a vendor")
+    parser.add_argument("-n", "--count", default=1, help="Number of times to repeat. Use 0 for infinite")
+    parser.add_argument("-c",  "--channel", default=0, help="Use 0 for random", type=int)
+    args = parser.parse_args()
 
-            # Send beacons
-            sendp(frame, iface=iface, inter=0.010, loop=0, verbose=1, count=8)
-            print("\n")
-except KeyboardInterrupt:
-    print(f"\n\nWifiSpammer stopped. Setting {args.interface} in managed mode")
-    setManaged(args.interface)
-    print("Done")
+    # List vendors if -l is present
+    if args.list_vendors:
+        print("Vendors to choose (default Apple):\n")
+        for vendor in vendors:
+            print(vendor)
+        return
+
+    # Check interface
+    if not args.interface:
+        raise ValueError("Interface not specified. Extiting...")
+    else:
+        interfaces = os.listdir("/sys/class/net/")
+        if args.interface not in interfaces:
+            raise ValueError("Interface not found")
+
+    # Set MAC
+    if args.random_mac:
+        sender = randomMAC()
+    else:
+        sender = randomMACVendor(vendors[args.vendor])
+
+    # random channel
+    if args.channel < 0 or args.channel > 12:
+        raise ValueError("Channel needs to be between 0 and 12")
+    if args.channel == 0:
+        channel = lambda: random.randint(1,11)
+    else:
+        channel = args.channel
+
+
+    # Set interface in monitor mode
+    prepare(args.interface)
+
+    # Main loop
+    try:
+        SSIDs = getSSIDs(args.file)
+        count = 0
+        while True:
+            send_beacons(args.interface, sender, channel, SSIDs)
+            count += 1
+            if args.count > 0 and count >= args.count:
+                break
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        teardown(args.interface)
+        print("Done")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as err:
+        print("Error occured: " + str(err))
+        sys.exit(1)
