@@ -1,7 +1,7 @@
 import random, os, argparse, sys
 from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt, RadioTap
 from scapy.sendrecv import sendp
-
+from time import sleep
 
 try:
     from scapy.layers.dot11 import (
@@ -62,12 +62,23 @@ def setIwconfig(interface, value):
                 "Something went wrong setting monitor mode! "
                 "Are you sure your card supports monitor mode?")
 
+def prepare(interface):
+    print("Prepare!")
+    exitValue = os.system(f"nmcli dev set {interface} managed no")
+    sleep(2)
+    if exitValue != 0:
+        raise OSError("Something went wrong when disabling network manager!")
+    setIwconfig(interface, "monitor")
+    sleep(2)
 
-# Sets interface in managed mode
-def setManaged(interface):
-    os.system(f"ifconfig {interface} down")
-    os.system(f"iwconfig {interface} mode managed")
-    os.system(f"ifconfig {interface} up")
+def teardown(interface):
+    print("Teardown!")
+    setIwconfig(interface, "managed")
+    sleep(2)
+    exitValue = os.system(f"nmcli dev set {interface} managed yes")
+    if exitValue != 0:
+        raise OSError("Something went wrong when enabling network manager!")
+    sleep(2)
 
 vendors = {"Nokia":"C0:41:21", "Apple":"BC:92:6B", 
         "Arduino":"A8:61:0A", "Motorola":"00:E0:0C", "Google":"54:60:09"}
@@ -107,17 +118,7 @@ def send_beacons(interface, sender, channel, SSIDs):
         essid = Dot11Elt(ID='SSID',info=SSID, len=len(SSID))
         frame = RadioTap() / dot11 / beacon / essid / rsn
         sendp(frame, iface=interface, inter=0.050, loop=0, verbose=1, count=8)
-
-def prepare(interface):
-    print("Prepare!")
-    os.system(f"nmcli dev set {interface} managed no")
-    setIwconfig(interface, "monitor")
-
-def teardown(interface):
-    print("Teardown!")
-    setIwconfig(interface, "managed")
-    os.system(f"nmcli dev set {interface} managed yes")
-
+        sleep(0.100)
 
 def main():
     # Check OS
